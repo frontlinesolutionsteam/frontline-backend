@@ -1,4 +1,5 @@
 import { pool } from "../../db/pool";
+import { deleteAvailability, writeAvailability } from "../cache/availabilityCache";
 
 export async function upsertCategory(
   merchantId: string,
@@ -71,6 +72,14 @@ export async function upsertItem(
       item.modifiedTime ? new Date(item.modifiedTime) : null,
     ],
   );
+
+  // Keep the fast-path availability cache in lockstep with every write to
+  // items, so 86'd-item checks never depend on a slower Postgres round trip.
+  await writeAvailability(merchantId, item.id, {
+    hidden: item.hidden ?? false,
+    available: item.available ?? true,
+  });
+
   return rows[0].id;
 }
 
@@ -88,4 +97,38 @@ export async function linkItemModifierGroup(itemId: string, modifierGroupId: str
      ON CONFLICT DO NOTHING`,
     [itemId, modifierGroupId],
   );
+}
+
+// Used by both the webhook DELETE handler and reconciliation's delete-
+// detection pass (items no longer present in a fresh full pull).
+export async function markItemDeleted(merchantId: string, cloverItemId: string): Promise<void> {
+  await pool.query(
+    `UPDATE items SET hidden = true, available = false, synced_at = now()
+     WHERE merchant_id = $1 AND clover_item_id = $2`,
+    [merchantId, cloverItemId],
+  );
+  await deleteAvailability(merchantId, cloverItemId);
+}
+
+export async function markCategoryDeleted(merchantId: string, cloverCategoryId: string): Promise<void> {
+  await pool.query(
+    `UPDATE categories SET deleted_at = now() WHERE merchant_id = $1 AND clover_category_id = $2`,
+    [merchantId, cloverCategoryId],
+  );
+}
+
+// items has no deleted_at column (see schema) — "deleted" is represented as
+// hidden=true/available=false, so this returns every known item and lets the
+// caller diff against a fresh pull to find ones no longer present in Clover.
+export async function getKnownCloverItemIds(merchantId: string): Promise<string[]> {
+  const { rows } = await pool.query(`SELECT clover_item_id FROM items WHERE merchant_id = $1`, [merchantId]);
+  return rows.map((r) => r.clover_item_id);
+}
+
+export async function getKnownCloverCategoryIds(merchantId: string): Promise<string[]> {
+  const { rows } = await pool.query(
+    `SELECT clover_category_id FROM categories WHERE merchant_id = $1 AND deleted_at IS NULL`,
+    [merchantId],
+  );
+  return rows.map((r) => r.clover_category_id);
 }

@@ -8,6 +8,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export class CloverApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
+    this.name = "CloverApiError";
+  }
+}
+
 export interface CloverRequestOptions {
   method?: string;
   query?: Record<string, string | number | undefined>;
@@ -54,7 +64,10 @@ export async function cloverRequest<T>(
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      throw new Error(`Clover API ${options.method ?? "GET"} ${path} failed: ${response.status} ${text}`);
+      throw new CloverApiError(
+        `Clover API ${options.method ?? "GET"} ${path} failed: ${response.status} ${text}`,
+        response.status,
+      );
     }
 
     return (await response.json()) as T;

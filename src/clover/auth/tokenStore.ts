@@ -21,6 +21,16 @@ export async function upsertMerchant(cloverMerchantId: string): Promise<Merchant
   return { id: row.id, cloverMerchantId: row.clover_merchant_id, status: row.status };
 }
 
+export async function getMerchantById(merchantId: string): Promise<MerchantRecord | null> {
+  const { rows } = await pool.query(
+    `SELECT id, clover_merchant_id, status FROM merchants WHERE id = $1`,
+    [merchantId],
+  );
+  if (rows.length === 0) return null;
+  const row = rows[0];
+  return { id: row.id, cloverMerchantId: row.clover_merchant_id, status: row.status };
+}
+
 export async function getMerchantByCloverId(cloverMerchantId: string): Promise<MerchantRecord | null> {
   const { rows } = await pool.query(
     `SELECT id, clover_merchant_id, status FROM merchants WHERE clover_merchant_id = $1`,
@@ -29,6 +39,13 @@ export async function getMerchantByCloverId(cloverMerchantId: string): Promise<M
   if (rows.length === 0) return null;
   const row = rows[0];
   return { id: row.id, cloverMerchantId: row.clover_merchant_id, status: row.status };
+}
+
+export async function getConnectedMerchants(): Promise<MerchantRecord[]> {
+  const { rows } = await pool.query(
+    `SELECT id, clover_merchant_id, status FROM merchants WHERE status = 'connected'`,
+  );
+  return rows.map((row) => ({ id: row.id, cloverMerchantId: row.clover_merchant_id, status: row.status }));
 }
 
 export async function saveTokenPair(merchantId: string, tokens: TokenPair): Promise<void> {

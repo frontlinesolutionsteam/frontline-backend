@@ -3,9 +3,12 @@ import crypto from "node:crypto";
 import express from "express";
 import { buildAuthorizeUrl, exchangeCodeForToken } from "./clover/auth/oauth";
 import { saveTokenPair, upsertMerchant } from "./clover/auth/tokenStore";
+import { webhooksRouter } from "./clover/webhooks/router";
 import { logger } from "./shared/logging/logger";
 
 const app = express();
+app.use(express.json());
+app.use("/webhooks", webhooksRouter);
 
 // Short-lived, single-use OAuth state values, keyed by value, cleared once consumed.
 const pendingStates = new Set<string>();
