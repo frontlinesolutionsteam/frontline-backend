@@ -7,6 +7,7 @@ import { buildAuthorizeUrl, exchangeCodeForToken } from "./clover/auth/oauth";
 import { saveTokenPair, upsertMerchant } from "./clover/auth/tokenStore";
 import { webhooksRouter } from "./clover/webhooks/router";
 import { logger } from "./shared/logging/logger";
+import { websiteApiRouter } from "./website-api/router";
 
 const app = express();
 app.use(express.json());
@@ -15,6 +16,9 @@ app.use("/webhooks", webhooksRouter);
 // Admin UI is a separate Next.js app on its own origin/port in dev.
 app.use("/admin", cors({ origin: process.env.ADMIN_APP_ORIGIN ?? "http://localhost:3001" }), adminApiRouter);
 app.use("/uploads", express.static(UPLOADS_DIR));
+
+// Storefront is a separate Next.js app on its own origin/port in dev.
+app.use("/website", cors({ origin: process.env.STOREFRONT_APP_ORIGIN ?? "http://localhost:3002" }), websiteApiRouter);
 
 // Short-lived, single-use OAuth state values, keyed by value, cleared once consumed.
 const pendingStates = new Set<string>();
