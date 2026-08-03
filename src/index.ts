@@ -1,6 +1,8 @@
 import "dotenv/config";
 import crypto from "node:crypto";
+import cors from "cors";
 import express from "express";
+import { adminApiRouter, UPLOADS_DIR } from "./admin-api/router";
 import { buildAuthorizeUrl, exchangeCodeForToken } from "./clover/auth/oauth";
 import { saveTokenPair, upsertMerchant } from "./clover/auth/tokenStore";
 import { webhooksRouter } from "./clover/webhooks/router";
@@ -9,6 +11,10 @@ import { logger } from "./shared/logging/logger";
 const app = express();
 app.use(express.json());
 app.use("/webhooks", webhooksRouter);
+
+// Admin UI is a separate Next.js app on its own origin/port in dev.
+app.use("/admin", cors({ origin: process.env.ADMIN_APP_ORIGIN ?? "http://localhost:3001" }), adminApiRouter);
+app.use("/uploads", express.static(UPLOADS_DIR));
 
 // Short-lived, single-use OAuth state values, keyed by value, cleared once consumed.
 const pendingStates = new Set<string>();
