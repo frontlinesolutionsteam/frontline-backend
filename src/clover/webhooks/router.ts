@@ -22,7 +22,14 @@ webhooksRouter.post("/clover", async (req, res) => {
   }
 
   if (!verifyCloverAuthHeader(req.header("X-Clover-Auth"))) {
-    logger.error("Webhook rejected: invalid or missing X-Clover-Auth header");
+    // Never log header values or any part of the auth secret here, even
+    // truncated -- this branch fires on attacker-controlled input as much as
+    // on real misconfiguration, and logs are a durable sink an attacker
+    // shouldn't be able to write chosen bytes into.
+    logger.error("Webhook rejected: invalid or missing X-Clover-Auth header", {
+      endpoint: req.path,
+      headerPresent: req.header("X-Clover-Auth") !== undefined,
+    });
     res.sendStatus(401);
     return;
   }
