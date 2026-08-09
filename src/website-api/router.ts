@@ -16,6 +16,10 @@ interface CheckoutBody {
   customer?: { phone?: string; firstName?: string; lastName?: string; email?: string };
   requestedTime?: string;
   note?: string;
+  source?: "website" | "ai_phone";
+  // GAP-4: required, caller-generated, stable across retries of one checkout
+  // attempt. See submitOrder.ts / mapCartToCloverOrder.ts GAP-4.
+  idempotencyKey?: string;
 }
 
 websiteApiRouter.post("/merchants/:merchantId/orders", async (req, res) => {
@@ -36,6 +40,10 @@ websiteApiRouter.post("/merchants/:merchantId/orders", async (req, res) => {
     res.status(400).json({ error: "customer.phone is required" });
     return;
   }
+  if (!body.idempotencyKey) {
+    res.status(400).json({ error: "idempotencyKey is required" });
+    return;
+  }
 
   try {
     const result = await submitOrder({
@@ -48,9 +56,10 @@ websiteApiRouter.post("/merchants/:merchantId/orders", async (req, res) => {
         lastName: body.customer.lastName,
         email: body.customer.email,
       },
-      source: "website",
+      source: body.source === "ai_phone" ? "ai_phone" : "website",
       requestedTime: body.requestedTime,
       note: body.note,
+      idempotencyKey: body.idempotencyKey,
     });
     res.json(result);
   } catch (err) {

@@ -5,6 +5,7 @@ import { readAvailability } from "../../menu-sync/cache/availabilityCache";
 import { logger } from "../../shared/logging/logger";
 import { triggerPrint } from "../printing/triggerPrint";
 import {
+  findOrderByIdempotencyKey,
   getCatalogItems,
   getCatalogModifiers,
   insertDraftOrder,
@@ -29,6 +30,10 @@ export interface SubmitOrderInput {
   source: "website" | "ai_phone";
   requestedTime?: string;
   note?: string;
+  // GAP-4: caller-supplied, stable across retries of the SAME checkout
+  // attempt (a network retry, a doubled click, a crashed process resuming).
+  // A fresh checkout must use a fresh key.
+  idempotencyKey: string;
 }
 
 export interface SubmitOrderResult {
@@ -47,6 +52,34 @@ export interface SubmitOrderResult {
 export async function submitOrder(input: SubmitOrderInput): Promise<SubmitOrderResult> {
   if (input.items.length === 0) {
     throw new Error("Cart is empty");
+  }
+  if (!input.idempotencyKey) {
+    throw new Error("idempotencyKey is required");
+  }
+
+  // GAP-4: if this exact checkout attempt already reached Clover, short-
+  // circuit before any catalog lookup or Clover call. This is the only thing
+  // standing between a client retry and a duplicate kitchen ticket -- Clover's
+  // atomic order endpoint does not dedupe (confirmed empirically: two POSTs
+  // with the same orderCart.id produced two distinct Clover orders).
+  //
+  // If a prior attempt for this key exists but never reached Clover (crash,
+  // or a Clover call that failed outright), cloverOrderId is null here and we
+  // fall through to the normal path; insertDraftOrder below will reuse that
+  // same draft row instead of creating a second one.
+  const existing = await findOrderByIdempotencyKey(input.merchantId, input.idempotencyKey);
+  if (existing?.cloverOrderId) {
+    logger.info("Duplicate checkout suppressed by idempotency key", {
+      orderId: existing.id,
+      cloverOrderId: existing.cloverOrderId,
+    });
+    return {
+      orderId: existing.id,
+      cloverOrderId: existing.cloverOrderId,
+      status: existing.status,
+      totalCents: existing.totalCents,
+      printTriggered: existing.status === "printed",
+    };
   }
 
   const itemIds = input.items.map((i) => i.itemId);
@@ -86,13 +119,14 @@ export async function submitOrder(input: SubmitOrderInput): Promise<SubmitOrderR
 
   const customer = await getOrCreateCustomer(input.merchantId, input.cloverMerchantId, input.customer);
 
-  const orderId = await insertDraftOrder(
+  const { orderId } = await insertDraftOrder(
     {
       merchantId: input.merchantId,
       customerId: customer.id,
       source: input.source,
       requestedTime: input.requestedTime ?? null,
       note: input.note ?? null,
+      idempotencyKey: input.idempotencyKey,
     },
     cartLineItems,
   );
