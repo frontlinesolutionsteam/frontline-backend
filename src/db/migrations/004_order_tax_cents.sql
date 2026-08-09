@@ -1,0 +1,11 @@
+-- GAP-3 fix: persist the tax Clover actually charged, not just our pre-tax
+-- subtotal.
+--
+-- `total_cents` already exists but was being set equal to `subtotal_cents` at
+-- draft-insert time (see repository.ts insertDraftOrder) -- before we knew
+-- what Clover would compute. Once the atomic order is confirmed, submitOrder
+-- now overwrites `total_cents` with Clover's authoritative tax-inclusive
+-- total and records the tax portion separately here, so `total_cents` is
+-- always "what the customer will actually be charged" and `tax_cents` is
+-- always derivable as `total_cents - subtotal_cents`.
+ALTER TABLE orders ADD COLUMN tax_cents INTEGER NOT NULL DEFAULT 0;

@@ -113,10 +113,21 @@ export async function findOrderByIdempotencyKey(
   return { id: row.id, status: row.status, cloverOrderId: row.clover_order_id, totalCents: row.total_cents };
 }
 
-export async function markOrderConfirmed(orderId: string, cloverOrderId: string): Promise<void> {
+// GAP-3: totalCents/taxCents come from Clover's own computation (the
+// authoritative source for what the customer will actually be charged), not
+// from our pre-tax subtotal. `total_cents` therefore stops meaning "our
+// subtotal" the moment an order confirms and starts meaning "what Clover
+// says this order costs" -- `subtotal_cents` remains the pre-tax figure so
+// `tax_cents` is always derivable as a cross-check (total - subtotal).
+export async function markOrderConfirmed(
+  orderId: string,
+  cloverOrderId: string,
+  totalCents: number,
+  taxCents: number,
+): Promise<void> {
   await pool.query(
-    `UPDATE orders SET clover_order_id = $1, status = 'confirmed_clover' WHERE id = $2`,
-    [cloverOrderId, orderId],
+    `UPDATE orders SET clover_order_id = $1, status = 'confirmed_clover', total_cents = $2, tax_cents = $3 WHERE id = $4`,
+    [cloverOrderId, totalCents, taxCents, orderId],
   );
 }
 

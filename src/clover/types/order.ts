@@ -6,8 +6,14 @@ export interface CloverOrderModificationInput {
 
 export interface CloverLineItemInput {
   item: { id: string };
-  unitQty: number;
+  // Only meaningful for items the merchant sells by weight/measure, where
+  // Clover reads it in thousandths (1000 = one unit). Plain items express
+  // quantity by repeating the line item instead -- see mapCartToCloverOrder.
+  unitQty?: number;
   note?: string;
+  // Suppresses the item's catalog tax rates for this line. We never set this
+  // today; it exists so tax-exempt orders have a home when we get there.
+  taxRemoved?: boolean;
   modifications?: CloverOrderModificationInput[];
 }
 
@@ -20,11 +26,33 @@ export interface CreateAtomicOrderRequest {
     lineItems: CloverLineItemInput[];
     note?: string;
     customer?: { id: string };
+    // Per-merchant id (e.g. the merchant's "Online Order" type). Controls how
+    // the ticket is labelled and routed on the POS, so it is client config,
+    // never a constant.
+    orderType?: { id: string };
+    title?: string;
   };
+}
+
+export interface CloverOrderLineItem {
+  id: string;
+  name?: string;
+  price?: number;
+  note?: string;
 }
 
 export interface CloverOrder {
   id: string;
   total: number;
   state: string;
+  currency?: string;
+  createdTime?: number;
+  lineItems?: { elements: CloverOrderLineItem[] };
 }
+
+// Confirmed empirically against the sandbox: Clover does NOT return a
+// top-level tax field on the order (create or get). Tax is only recoverable
+// as `total - sum(line item prices + modifications)`. There was previously an
+// (incorrect) `taxAmount` field on CloverOrder -- removed rather than left
+// around returning undefined forever. See computeExpectedTax.ts for how we
+// derive our own expected tax instead.

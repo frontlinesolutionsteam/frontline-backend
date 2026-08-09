@@ -13,6 +13,8 @@
     "migrate": "tsx src/db/migrate.ts",
     "set-clover-credentials": "tsx src/scripts/setCloverCredentials.ts",
     "test-clover-idempotency": "tsx src/scripts/testIdempotency.ts",
+    "test-clover-order": "tsx src/scripts/testSandboxOrder.ts",
+    "test-clover-tax": "tsx src/scripts/testTaxCalculation.ts",
     "sync-menu": "tsx src/menu-sync/reconciliation/pullMenu.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
     "webhook-worker": "tsx src/menu-sync/handlers/worker.ts",

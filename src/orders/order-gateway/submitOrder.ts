@@ -1,26 +1,20 @@
-import { cloverRequest } from "../../clover/client/httpClient";
-import type { CloverLineItemInput, CloverOrder } from "../../clover/types/order";
+import { getOrderTypeId } from "../../clover/auth/apiTokenStore";
+import { createAtomicOrder } from "../../clover/orders/createAtomicOrder";
+import type { CloverOrder } from "../../clover/types/order";
 import { getOrCreateCustomer, type CustomerInput } from "../../customers/repository";
-import { readAvailability } from "../../menu-sync/cache/availabilityCache";
+import { mapCartToCloverOrder } from "./mapCartToCloverOrder";
 import { logger } from "../../shared/logging/logger";
 import { triggerPrint } from "../printing/triggerPrint";
 import {
   findOrderByIdempotencyKey,
-  getCatalogItems,
-  getCatalogModifiers,
   insertDraftOrder,
   markOrderConfirmed,
   markOrderFailed,
   markOrderPrinted,
-  type CartLineItem,
 } from "./repository";
+import { resolveCartLines, type CheckoutLineItemInput } from "./resolveCartLines";
 
-export interface CheckoutLineItemInput {
-  itemId: string; // our uuid
-  quantity: number;
-  note?: string;
-  modifierIds?: string[]; // our uuid
-}
+export type { CheckoutLineItemInput };
 
 export interface SubmitOrderInput {
   merchantId: string; // our uuid
@@ -32,7 +26,7 @@ export interface SubmitOrderInput {
   note?: string;
   // GAP-4: caller-supplied, stable across retries of the SAME checkout
   // attempt (a network retry, a doubled click, a crashed process resuming).
-  // A fresh checkout must use a fresh key.
+  // A fresh checkout must use a fresh key. See mapCartToCloverOrder.ts GAP-4.
   idempotencyKey: string;
 }
 
@@ -82,40 +76,12 @@ export async function submitOrder(input: SubmitOrderInput): Promise<SubmitOrderR
     };
   }
 
-  const itemIds = input.items.map((i) => i.itemId);
-  const catalogItems = await getCatalogItems(input.merchantId, itemIds);
-  const catalogById = new Map(catalogItems.map((c) => [c.id, c]));
-
-  for (const cartItem of input.items) {
-    const catalog = catalogById.get(cartItem.itemId);
-    if (!catalog) throw new Error(`Unknown item ${cartItem.itemId}`);
-    if (catalog.hidden) throw new Error(`${catalog.name} is not on the menu`);
-
-    const live = await readAvailability(input.merchantId, catalog.cloverItemId);
-    const isAvailable = live ? live.available && !live.hidden : catalog.available;
-    if (!isAvailable) throw new Error(`${catalog.name} is currently unavailable`);
-  }
-
-  const allModifierIds = [...new Set(input.items.flatMap((i) => i.modifierIds ?? []))];
-  const modifierById = new Map((await getCatalogModifiers(allModifierIds)).map((m) => [m.id, m]));
-
-  const cartLineItems: CartLineItem[] = input.items.map((cartItem) => {
-    const catalog = catalogById.get(cartItem.itemId)!;
-    const modifiers = (cartItem.modifierIds ?? []).map((modifierId) => {
-      const modifier = modifierById.get(modifierId);
-      if (!modifier) throw new Error(`Unknown modifier ${modifierId}`);
-      return modifier;
-    });
-    return {
-      itemId: catalog.id,
-      cloverItemId: catalog.cloverItemId,
-      name: catalog.name,
-      priceCents: catalog.priceCents,
-      quantity: cartItem.quantity,
-      note: cartItem.note,
-      modifiers,
-    };
-  });
+  const { cartLineItems, internalOrderLines } = await resolveCartLines(
+    input.merchantId,
+    input.cloverMerchantId,
+    input.items,
+    { checkAvailability: true },
+  );
 
   const customer = await getOrCreateCustomer(input.merchantId, input.cloverMerchantId, input.customer);
 
@@ -131,44 +97,54 @@ export async function submitOrder(input: SubmitOrderInput): Promise<SubmitOrderR
     cartLineItems,
   );
 
-  // Clover has no structured "scheduled pickup time" field on an order --
-  // it has to be encoded as text on the ticket, per the architecture doc.
-  const orderNoteParts = [input.requestedTime ? `Pickup: ${input.requestedTime}` : null, input.note].filter(
-    (part): part is string => Boolean(part),
-  );
+  // Everything Clover-shaped happens in the mapping layer, which also reports
+  // where our cart format falls short of Clover's order model. Tax rates were
+  // already fetched by resolveCartLines above.
+  const mapped = mapCartToCloverOrder({
+    lines: internalOrderLines,
+    source: input.source,
+    note: input.note,
+    requestedTime: input.requestedTime,
+    cloverCustomerId: customer.cloverCustomerId ?? undefined,
+    cloverOrderTypeId: (await getOrderTypeId(input.merchantId)) ?? undefined,
+  });
 
-  const cloverLineItems: CloverLineItemInput[] = cartLineItems.map((li) => ({
-    item: { id: li.cloverItemId },
-    unitQty: li.quantity,
-    note: li.note,
-    modifications: li.modifiers.length
-      ? li.modifiers.map((m) => ({ modifier: { id: m.cloverModifierId }, name: m.name, amount: m.priceCents }))
-      : undefined,
-  }));
+  if (mapped.warnings.length) {
+    logger.warn("Cart mapped to Clover order with gaps", { orderId, warnings: mapped.warnings });
+  }
 
   let cloverOrder: CloverOrder;
   try {
-    cloverOrder = await cloverRequest<CloverOrder>(
-      input.merchantId,
-      input.cloverMerchantId,
-      "/atomic_order/orders",
-      {
-        method: "POST",
-        body: {
-          orderCart: {
-            state: "open",
-            lineItems: cloverLineItems,
-            note: orderNoteParts.length ? orderNoteParts.join(" | ") : undefined,
-          },
-        },
-      },
-    );
+    cloverOrder = await createAtomicOrder(input.merchantId, input.cloverMerchantId, mapped.request);
   } catch (err) {
     await markOrderFailed(orderId);
     throw err;
   }
 
-  await markOrderConfirmed(orderId, cloverOrder.id);
+  // GAP-3: cloverOrder.total is the ground truth for what the customer will
+  // actually be charged; mapped.expectedTotalCents is our replica of Clover's
+  // tax computation, kept only as a monitoring cross-check (see
+  // computeExpectedTax.ts for the rounding rules this reproduces and the two
+  // sub-cases -- exact-.5-cent ties, taxed modifiers -- that remain
+  // unverified). A mismatch here means one of those unverified cases has
+  // actually occurred, or a line's tax rates could not be resolved; it is
+  // logged loudly rather than silently trusted either way. Clover's own
+  // response has no separate tax field, so the tax actually charged is
+  // derived the same way here: total minus our (tax-independent) subtotal.
+  const actualTaxCents = cloverOrder.total - mapped.expectedSubtotalCents;
+  if (cloverOrder.total !== mapped.expectedTotalCents) {
+    logger.error("Our expected tax total did not match Clover's -- see computeExpectedTax.ts for known gaps", {
+      orderId,
+      cloverOrderId: cloverOrder.id,
+      expectedSubtotalCents: mapped.expectedSubtotalCents,
+      expectedTaxCents: mapped.expectedTaxCents,
+      expectedTotalCents: mapped.expectedTotalCents,
+      cloverTotalCents: cloverOrder.total,
+      actualTaxCents,
+    });
+  }
+
+  await markOrderConfirmed(orderId, cloverOrder.id, cloverOrder.total, actualTaxCents);
 
   const printResult = await triggerPrint(input.merchantId, input.cloverMerchantId, cloverOrder.id);
   if (printResult.success) {
