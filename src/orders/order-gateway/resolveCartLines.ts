@@ -10,10 +10,23 @@ export interface CheckoutLineItemInput {
   modifierIds?: string[]; // our uuid
 }
 
+export interface UnavailableCartItem {
+  itemId: string; // our uuid
+  name: string;
+}
+
 export interface ResolvedCartLines {
   cartLineItems: CartLineItem[];
   /** Ready to hand straight to mapCartToCloverOrder -- tax rates already attached. */
   internalOrderLines: InternalOrderLine[];
+  /**
+   * Cart items that are currently hidden or unavailable, checked live via the
+   * same Redis cache webhooks/reconciliation write to -- populated regardless
+   * of `checkAvailability`, so a caller that doesn't want a hard throw (the
+   * cart preview) still gets full visibility into every offending line, not
+   * just the first one.
+   */
+  unavailableItems: UnavailableCartItem[];
 }
 
 // Shared by submitOrder (checkAvailability: true, since placing an order must
@@ -34,15 +47,22 @@ export async function resolveCartLines(
   const catalogItems = await getCatalogItems(merchantId, itemIds);
   const catalogById = new Map(catalogItems.map((c) => [c.id, c]));
 
+  const unavailableItems: UnavailableCartItem[] = [];
   for (const cartItem of items) {
     const catalog = catalogById.get(cartItem.itemId);
-    if (!catalog) throw new Error(`Unknown item ${cartItem.itemId}`);
-    if (catalog.hidden) throw new Error(`${catalog.name} is not on the menu`);
+    if (!catalog) throw new Error(`Unknown item ${cartItem.itemId}`); // client sent an id that isn't in the catalog at all -- not a "went unavailable" case
 
-    if (options.checkAvailability) {
-      const live = await readAvailability(merchantId, catalog.cloverItemId);
-      const isAvailable = live ? live.available && !live.hidden : catalog.available;
-      if (!isAvailable) throw new Error(`${catalog.name} is currently unavailable`);
+    if (catalog.hidden) {
+      if (options.checkAvailability) throw new Error(`${catalog.name} is not on the menu`);
+      unavailableItems.push({ itemId: catalog.id, name: catalog.name });
+      continue;
+    }
+
+    const live = await readAvailability(merchantId, catalog.cloverItemId);
+    const isAvailable = live ? live.available && !live.hidden : catalog.available;
+    if (!isAvailable) {
+      if (options.checkAvailability) throw new Error(`${catalog.name} is currently unavailable`);
+      unavailableItems.push({ itemId: catalog.id, name: catalog.name });
     }
   }
 
@@ -90,5 +110,5 @@ export async function resolveCartLines(
     taxRates: taxRatesByCloverItemId.get(li.cloverItemId),
   }));
 
-  return { cartLineItems, internalOrderLines };
+  return { cartLineItems, internalOrderLines, unavailableItems };
 }
