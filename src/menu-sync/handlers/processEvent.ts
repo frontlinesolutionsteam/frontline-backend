@@ -66,9 +66,9 @@ async function processItemEvent(
 
   try {
     const item = await cloverRequest<CloverItem>(merchantId, cloverMerchantId, `/items/${event.cloverObjectId}`, {
-      query: { expand: "categories,modifierGroups" },
+      query: { expand: "categories,modifierGroups,itemStock" },
     });
-    const itemId = await upsertItem(merchantId, item);
+    const { id: itemId } = await upsertItem(merchantId, item);
 
     for (const category of item.categories?.elements ?? []) {
       const categoryId = await upsertCategory(merchantId, category);

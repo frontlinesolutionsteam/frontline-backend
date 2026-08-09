@@ -20,6 +20,8 @@ export interface PublicItem {
   description: string | null;
   priceCents: number;
   available: boolean;
+  /** Informational only -- never gates orderability, unlike `available`. True when quantity <= stockAlertThreshold and both are tracked. */
+  lowStock: boolean;
   imageUrl: string | null;
   modifierGroups: PublicModifierGroup[];
 }
@@ -43,7 +45,7 @@ export async function getPublicMenu(merchantId: string): Promise<PublicCategory[
   );
 
   const { rows: itemRows } = await pool.query(
-    `SELECT i.id, i.name, i.description, i.price_cents, i.available, i.image_url, ic.category_id
+    `SELECT i.id, i.name, i.description, i.price_cents, i.available, i.quantity, i.stock_alert_threshold, i.image_url, ic.category_id
      FROM items i
      JOIN item_categories ic ON ic.item_id = i.id
      WHERE i.merchant_id = $1 AND i.hidden = false
@@ -97,6 +99,8 @@ export async function getPublicMenu(merchantId: string): Promise<PublicCategory[
       description: row.description,
       priceCents: row.price_cents,
       available: row.available,
+      lowStock:
+        row.quantity !== null && row.stock_alert_threshold !== null && Number(row.quantity) <= Number(row.stock_alert_threshold),
       imageUrl: row.image_url,
       modifierGroups: groupsByItem.get(row.id) ?? [],
     });

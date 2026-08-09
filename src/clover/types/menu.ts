@@ -22,6 +22,15 @@ export interface CloverModifierGroup {
   modifiers?: CloverElements<CloverModifier>;
 }
 
+// Distinct from `available` -- an item can be quantity-tracked (autoManage)
+// or just manually toggled on/off. quantity/stockAlertThreshold only appear
+// when the item is expanded with `itemStock` and the merchant tracks stock
+// for it at all; most items have no stock object.
+export interface CloverItemStock {
+  quantity?: number;
+  stockAlertThreshold?: number;
+}
+
 export interface CloverItem {
   id: string;
   name: string;
@@ -31,6 +40,7 @@ export interface CloverItem {
   modifiedTime?: number; // ms since epoch
   categories?: CloverElements<CloverCategory>;
   modifierGroups?: CloverElements<CloverModifierGroup>;
+  itemStock?: CloverItemStock;
 }
 
 export interface CloverPage<T> {

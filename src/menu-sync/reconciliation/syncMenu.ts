@@ -8,6 +8,7 @@ import {
   upsertItem,
   upsertModifier,
   upsertModifierGroup,
+  type AvailabilityDrift,
 } from "./repository";
 
 export interface MenuSyncResult {
@@ -18,6 +19,8 @@ export interface MenuSyncResult {
   itemCount: number;
   modifierGroupCount: number;
   modifierCount: number;
+  /** Items whose hidden/available changed from what was already cached -- see reconcileMenu.ts. */
+  availabilityDrift: AvailabilityDrift[];
 }
 
 // Full pull + upsert of a merchant's menu (categories, modifier groups,
@@ -57,10 +60,12 @@ export async function pullAndSyncMenu(cloverMerchantId: string): Promise<MenuSyn
   }
 
   const items = await fetchAllPages<CloverItem>(merchant.id, cloverMerchantId, "/items", {
-    expand: "categories,modifierGroups",
+    expand: "categories,modifierGroups,itemStock",
   });
+  const availabilityDrift: AvailabilityDrift[] = [];
   for (const item of items) {
-    const itemId = await upsertItem(merchant.id, item);
+    const { id: itemId, drift } = await upsertItem(merchant.id, item);
+    if (drift) availabilityDrift.push(drift);
 
     for (const category of item.categories?.elements ?? []) {
       const categoryId = categoryIdMap.get(category.id);
@@ -80,5 +85,6 @@ export async function pullAndSyncMenu(cloverMerchantId: string): Promise<MenuSyn
     itemCount: items.length,
     modifierGroupCount: modifierGroups.length,
     modifierCount,
+    availabilityDrift,
   };
 }

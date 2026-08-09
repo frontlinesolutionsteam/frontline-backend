@@ -1,5 +1,5 @@
 import { pool } from "../../db/pool";
-import { deleteAvailability, writeAvailability } from "../cache/availabilityCache";
+import { deleteAvailability, readAvailability, writeAvailability, type ItemAvailability } from "../cache/availabilityCache";
 
 export async function upsertCategory(
   merchantId: string,
@@ -46,19 +46,60 @@ export async function upsertModifier(
   return rows[0].id;
 }
 
-export async function upsertItem(
-  merchantId: string,
-  item: { id: string; name: string; price?: number; hidden?: boolean; available?: boolean; modifiedTime?: number },
-): Promise<string> {
+export interface UpsertableItem {
+  id: string;
+  name: string;
+  price?: number;
+  hidden?: boolean;
+  available?: boolean;
+  modifiedTime?: number;
+  /** Clover's separate stock-tracking concept -- informational only, never gates orderability. See migration 006. */
+  itemStock?: { quantity?: number; stockAlertThreshold?: number };
+}
+
+export interface AvailabilityDrift {
+  cloverItemId: string;
+  name: string;
+  previous: ItemAvailability | null;
+  current: ItemAvailability;
+}
+
+export interface UpsertItemResult {
+  id: string;
+  /** Non-null when this write changed hidden/available from what was already cached -- see reconcileMenu.ts for why this matters. */
+  drift: AvailabilityDrift | null;
+}
+
+export async function upsertItem(merchantId: string, item: UpsertableItem): Promise<UpsertItemResult> {
+  const current: ItemAvailability = {
+    hidden: item.hidden ?? false,
+    available: item.available ?? true,
+  };
+
+  // Read the PRIOR cached state before overwriting it -- this is what lets a
+  // caller (reconcileMenu.ts) tell "Clover's value matched what we already
+  // had" apart from "the poll just corrected something stale", which is the
+  // whole signal for how reliable the webhook channel actually is. Cheap
+  // (one Redis GET) and harmless for callers that don't care (pullMenu.ts's
+  // manual one-off sync, and every webhook-driven call from processEvent.ts,
+  // simply ignore the drift field).
+  const previous = await readAvailability(merchantId, item.id);
+  const drift =
+    previous && previous.hidden === current.hidden && previous.available === current.available
+      ? null
+      : { cloverItemId: item.id, name: item.name, previous, current };
+
   const { rows } = await pool.query(
-    `INSERT INTO items (merchant_id, clover_item_id, name, price_cents, hidden, available, modified_at_clover, synced_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+    `INSERT INTO items (merchant_id, clover_item_id, name, price_cents, hidden, available, quantity, stock_alert_threshold, modified_at_clover, synced_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
      ON CONFLICT (merchant_id, clover_item_id)
      DO UPDATE SET
        name = EXCLUDED.name,
        price_cents = EXCLUDED.price_cents,
        hidden = EXCLUDED.hidden,
        available = EXCLUDED.available,
+       quantity = EXCLUDED.quantity,
+       stock_alert_threshold = EXCLUDED.stock_alert_threshold,
        modified_at_clover = EXCLUDED.modified_at_clover,
        synced_at = now()
      RETURNING id`,
@@ -67,20 +108,19 @@ export async function upsertItem(
       item.id,
       item.name,
       item.price ?? 0,
-      item.hidden ?? false,
-      item.available ?? true,
+      current.hidden,
+      current.available,
+      item.itemStock?.quantity ?? null,
+      item.itemStock?.stockAlertThreshold ?? null,
       item.modifiedTime ? new Date(item.modifiedTime) : null,
     ],
   );
 
   // Keep the fast-path availability cache in lockstep with every write to
   // items, so 86'd-item checks never depend on a slower Postgres round trip.
-  await writeAvailability(merchantId, item.id, {
-    hidden: item.hidden ?? false,
-    available: item.available ?? true,
-  });
+  await writeAvailability(merchantId, item.id, current);
 
-  return rows[0].id;
+  return { id: rows[0].id, drift };
 }
 
 export async function linkItemCategory(itemId: string, categoryId: string): Promise<void> {
