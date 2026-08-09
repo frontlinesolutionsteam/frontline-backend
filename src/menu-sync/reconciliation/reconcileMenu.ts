@@ -5,13 +5,35 @@ import { closeAvailabilityCache } from "../cache/availabilityCache";
 import { getKnownCloverCategoryIds, getKnownCloverItemIds, markCategoryDeleted, markItemDeleted } from "./repository";
 import { pullAndSyncMenu } from "./syncMenu";
 
-// Nightly full reconciliation: defense against missed/failed webhook
-// deliveries, which Clover doesn't guarantee. Re-pulls and upserts the whole
-// menu (same as the manual sync), then marks anything in our DB that no
-// longer showed up in the fresh pull as deleted — the one thing webhook
-// replay from thin payloads can't reliably tell us on its own.
-async function reconcileMerchant(cloverMerchantId: string): Promise<void> {
+// Defense against missed/failed webhook deliveries, which Clover doesn't
+// guarantee. Re-pulls and upserts the whole menu (same as the manual sync),
+// then marks anything in our DB that no longer showed up in the fresh pull
+// as deleted -- the one thing webhook replay from thin payloads can't
+// reliably tell us on its own.
+//
+// Exported (not just called from main() below) so reconcileLoop.ts can run
+// this on a recurring interval as a persistent process, reusing the exact
+// same logic the one-off/cron-invoked CLI below uses -- see that file for
+// why a separate entrypoint rather than making this file loop by default.
+export async function reconcileMerchant(cloverMerchantId: string): Promise<void> {
   const result = await pullAndSyncMenu(cloverMerchantId);
+
+  // This is the signal for how reliable the webhook channel actually is: an
+  // item's availabilityDrift entry here means Clover's real state differed
+  // from what we already had cached BEFORE this poll ran, i.e. no webhook
+  // (or a webhook that failed to process) had corrected it yet. Logged at
+  // 'warn' specifically to stand out from the routine 'info' summary below --
+  // every one of these during normal operation (no manual DB edits, no
+  // process outage) represents a gap the webhook channel alone left open.
+  for (const drift of result.availabilityDrift) {
+    logger.warn("Reconciliation caught an availability change the webhook channel missed", {
+      cloverMerchantId,
+      cloverItemId: drift.cloverItemId,
+      name: drift.name,
+      previous: drift.previous,
+      current: drift.current,
+    });
+  }
 
   const knownItemIds = await getKnownCloverItemIds(result.merchant.id);
   const missingItemIds = knownItemIds.filter((id) => !result.itemIds.has(id));
@@ -31,6 +53,7 @@ async function reconcileMerchant(cloverMerchantId: string): Promise<void> {
     items: result.itemCount,
     itemsMarkedDeleted: missingItemIds.length,
     categoriesMarkedDeleted: missingCategoryIds.length,
+    availabilityDriftCaught: result.availabilityDrift.length,
   });
 }
 
@@ -57,9 +80,17 @@ async function main() {
   }
 }
 
-main()
-  .catch((err) => {
-    console.error(err);
-    process.exitCode = 1;
-  })
-  .finally(() => Promise.all([pool.end(), closeAvailabilityCache()]));
+// Only run as a one-shot CLI when invoked directly (`pnpm reconcile-menu`,
+// or a cron entry) -- reconcileLoop.ts imports reconcileMerchant/main's
+// per-merchant logic without wanting this file's own process lifecycle
+// (pool.end() etc) to fire on import.
+if (require.main === module) {
+  main()
+    .catch((err) => {
+      console.error(err);
+      process.exitCode = 1;
+    })
+    .finally(() => Promise.all([pool.end(), closeAvailabilityCache()]));
+}
+
+export { main as reconcileAllConnectedMerchants };

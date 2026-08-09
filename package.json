@@ -19,7 +19,8 @@
     "sync-menu": "tsx src/menu-sync/reconciliation/pullMenu.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
     "webhook-worker": "tsx src/menu-sync/handlers/worker.ts",
-    "reconcile-menu": "tsx src/menu-sync/reconciliation/reconcileMenu.ts"
+    "reconcile-menu": "tsx src/menu-sync/reconciliation/reconcileMenu.ts",
+    "reconcile-loop": "tsx src/menu-sync/reconciliation/reconcileLoop.ts"
   },
   "keywords": [],
   "author": "",

@@ -9,6 +9,12 @@ async function main(cloverMerchantId: string) {
   console.log(`  categories: ${result.categoryCount}`);
   console.log(`  modifier groups: ${result.modifierGroupCount} (${result.modifierCount} modifiers)`);
   console.log(`  items: ${result.itemCount}`);
+  if (result.availabilityDrift.length > 0) {
+    console.log(`  availability changed for ${result.availabilityDrift.length} item(s):`);
+    for (const d of result.availabilityDrift) {
+      console.log(`    - ${d.name}: ${JSON.stringify(d.previous)} -> ${JSON.stringify(d.current)}`);
+    }
+  }
   console.log("Menu pull complete.");
 }
 
