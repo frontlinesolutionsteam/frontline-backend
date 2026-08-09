@@ -4,6 +4,7 @@ import { getOrderStatus } from "../orders/order-gateway/repository";
 import { previewCart } from "../orders/order-gateway/previewCart";
 import type { CheckoutLineItemInput } from "../orders/order-gateway/resolveCartLines";
 import { submitOrder } from "../orders/order-gateway/submitOrder";
+import { PaymentAlreadyAttemptedError, PaymentDeclinedError, submitPaidOrder } from "../orders/order-gateway/submitPaidOrder";
 import { getPublicMenu } from "./repository";
 
 export const websiteApiRouter = Router();
@@ -46,6 +47,11 @@ interface CheckoutBody {
   // GAP-4: required, caller-generated, stable across retries of one checkout
   // attempt. See submitOrder.ts / mapCartToCloverOrder.ts GAP-4.
   idempotencyKey?: string;
+  // Single-use clv_... token from the storefront's Clover iframe. Required
+  // for website checkout (this is how the customer pays); never used for
+  // ai_phone -- voice card capture is a separate, out-of-scope problem, so
+  // AI phone orders keep going through the unpaid/pay-at-pickup path below.
+  sourceToken?: string;
 }
 
 websiteApiRouter.post("/merchants/:merchantId/orders", async (req, res) => {
@@ -71,24 +77,58 @@ websiteApiRouter.post("/merchants/:merchantId/orders", async (req, res) => {
     return;
   }
 
+  const customer = {
+    phone: body.customer.phone,
+    firstName: body.customer.firstName,
+    lastName: body.customer.lastName,
+    email: body.customer.email,
+  };
+
+  if (body.source === "ai_phone") {
+    try {
+      const result = await submitOrder({
+        merchantId,
+        cloverMerchantId: merchant.cloverMerchantId,
+        items: body.items,
+        customer,
+        source: "ai_phone",
+        requestedTime: body.requestedTime,
+        note: body.note,
+        idempotencyKey: body.idempotencyKey,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+    return;
+  }
+
+  if (!body.sourceToken) {
+    res.status(400).json({ error: "sourceToken is required" });
+    return;
+  }
+
   try {
-    const result = await submitOrder({
+    const result = await submitPaidOrder({
       merchantId,
       cloverMerchantId: merchant.cloverMerchantId,
       items: body.items,
-      customer: {
-        phone: body.customer.phone,
-        firstName: body.customer.firstName,
-        lastName: body.customer.lastName,
-        email: body.customer.email,
-      },
-      source: body.source === "ai_phone" ? "ai_phone" : "website",
+      customer,
       requestedTime: body.requestedTime,
       note: body.note,
       idempotencyKey: body.idempotencyKey,
+      sourceToken: body.sourceToken,
     });
     res.json(result);
   } catch (err) {
+    if (err instanceof PaymentDeclinedError) {
+      res.status(402).json({ error: err.message, declined: true, declineCode: err.declineCode });
+      return;
+    }
+    if (err instanceof PaymentAlreadyAttemptedError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });

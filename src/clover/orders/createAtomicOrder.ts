@@ -58,3 +58,22 @@ export async function getOrder(
     query: { expand: "lineItems" },
   });
 }
+
+// DELETE /v3/merchants/{mId}/orders/{orderId} -- best-effort cleanup used only
+// when a pay-for-order call's outcome is genuinely unknown (a network/
+// transport failure, not a clean decline response -- see submitPaidOrder.ts).
+// Clover's own docs note an order cannot be deleted once it has a payment,
+// credit, refund, or printed line items, so this only succeeds for an order
+// that never actually got paid or printed -- exactly the case where we want
+// it gone. Never assume this succeeds; callers must still log loudly and let
+// a human confirm, since the whole reason we're here is that we don't know
+// what actually happened on Clover's side.
+export async function deleteOrder(
+  merchantId: string,
+  cloverMerchantId: string,
+  cloverOrderId: string,
+): Promise<void> {
+  await cloverRequest<void>(merchantId, cloverMerchantId, `/orders/${cloverOrderId}`, {
+    method: "DELETE",
+  });
+}

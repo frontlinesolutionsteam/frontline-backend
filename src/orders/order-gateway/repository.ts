@@ -98,6 +98,9 @@ export interface ExistingOrderSnapshot {
   status: string;
   cloverOrderId: string | null;
   totalCents: number;
+  cloverChargeId: string | null;
+  paymentStatus: string;
+  declineReason: string | null;
 }
 
 export async function findOrderByIdempotencyKey(
@@ -105,12 +108,98 @@ export async function findOrderByIdempotencyKey(
   idempotencyKey: string,
 ): Promise<ExistingOrderSnapshot | null> {
   const { rows } = await pool.query(
-    `SELECT id, status, clover_order_id, total_cents FROM orders WHERE merchant_id = $1 AND idempotency_key = $2`,
+    `SELECT id, status, clover_order_id, total_cents, clover_charge_id, payment_status, decline_reason
+     FROM orders WHERE merchant_id = $1 AND idempotency_key = $2`,
     [merchantId, idempotencyKey],
   );
   if (rows.length === 0) return null;
   const row = rows[0];
-  return { id: row.id, status: row.status, cloverOrderId: row.clover_order_id, totalCents: row.total_cents };
+  return {
+    id: row.id,
+    status: row.status,
+    cloverOrderId: row.clover_order_id,
+    totalCents: row.total_cents,
+    cloverChargeId: row.clover_charge_id,
+    paymentStatus: row.payment_status,
+    declineReason: row.decline_reason,
+  };
+}
+
+// Atomically claims a draft row for a charge attempt. Only the caller that
+// flips 'draft' -> 'charging' gets to actually call Clover; a concurrent
+// request (a double-click firing two requests before either completes) sees
+// 0 rows updated and must not charge. This is the guard insertDraftOrder's
+// ON CONFLICT lock (migration 003) does NOT provide by itself -- that lock
+// only dedupes the row's INSERT, not what two callers do once they both see
+// the same existing row.
+export async function claimOrderForCharging(orderId: string): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `UPDATE orders SET status = 'charging' WHERE id = $1 AND status = 'draft'`,
+    [orderId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+// Recorded immediately after the Platform atomic order is created, BEFORE
+// payment is attempted -- see submitPaidOrder.ts. This is what makes a crash
+// between "order created" and "payment attempted" resumable without creating
+// a second Clover order: a retry with the same idempotency key finds
+// clover_order_id already set and skips straight to paying that order.
+// total_cents/tax_cents are known for certain at this point (the atomic
+// order create response gives us Clover's own total immediately), so they're
+// recorded here rather than guessed at.
+export async function markOrderCreatedAwaitingPayment(
+  orderId: string,
+  cloverOrderId: string,
+  totalCents: number,
+  taxCents: number,
+): Promise<void> {
+  await pool.query(
+    `UPDATE orders SET clover_order_id = $1, total_cents = $2, tax_cents = $3 WHERE id = $4`,
+    [cloverOrderId, totalCents, taxCents, orderId],
+  );
+}
+
+// A decline is terminal for this idempotency key -- see submitPaidOrder.ts
+// for why we don't allow a same-key retry after this (tokens are single-use
+// and a genuine retry should mint a fresh key). status='failed' already
+// exists in the schema; nothing Clover-side was ever created.
+export async function markChargeDeclined(orderId: string, declineReason: string): Promise<void> {
+  await pool.query(`UPDATE orders SET status = 'failed', decline_reason = $1 WHERE id = $2`, [
+    declineReason,
+    orderId,
+  ]);
+}
+
+export async function markOrderRefunded(orderId: string): Promise<void> {
+  await pool.query(`UPDATE orders SET payment_status = 'refunded' WHERE id = $1`, [orderId]);
+}
+
+export interface OrderByCloverOrderId {
+  id: string;
+  merchantId: string;
+  cloverChargeId: string | null;
+  paymentStatus: string;
+  totalCents: number;
+}
+
+// Used by the refund path: staff identify an order by its Clover atomic
+// order id (what's printed on the ticket / visible in the Clover dashboard),
+// not by our internal uuid or the Ecommerce charge id.
+export async function getOrderByCloverOrderId(cloverOrderId: string): Promise<OrderByCloverOrderId | null> {
+  const { rows } = await pool.query(
+    `SELECT id, merchant_id, clover_charge_id, payment_status, total_cents FROM orders WHERE clover_order_id = $1`,
+    [cloverOrderId],
+  );
+  if (rows.length === 0) return null;
+  const row = rows[0];
+  return {
+    id: row.id,
+    merchantId: row.merchant_id,
+    cloverChargeId: row.clover_charge_id,
+    paymentStatus: row.payment_status,
+    totalCents: row.total_cents,
+  };
 }
 
 // GAP-3: totalCents/taxCents come from Clover's own computation (the
@@ -128,6 +217,23 @@ export async function markOrderConfirmed(
   await pool.query(
     `UPDATE orders SET clover_order_id = $1, status = 'confirmed_clover', total_cents = $2, tax_cents = $3 WHERE id = $4`,
     [cloverOrderId, totalCents, taxCents, orderId],
+  );
+}
+
+// Used by the paid checkout path (submitPaidOrder.ts) once POST
+// /v1/orders/{orderId}/pay succeeds -- payment is attached to the SAME
+// Platform atomic order (clover_order_id was already set by
+// markOrderCreatedAwaitingPayment), so this order shows as paid in Clover's
+// own Orders list and Sales Overview reporting, not just in our DB. The
+// plain markOrderConfirmed above stays untouched for the unpaid/pay-at-pickup
+// path (submitOrder.ts), which the AI phone-order flow still uses.
+export async function markOrderConfirmedAndPaid(
+  orderId: string,
+  cloverChargeId: string,
+): Promise<void> {
+  await pool.query(
+    `UPDATE orders SET status = 'confirmed_clover', payment_status = 'paid', clover_charge_id = $1, payment_method = 'iframe_web' WHERE id = $2`,
+    [cloverChargeId, orderId],
   );
 }
 
