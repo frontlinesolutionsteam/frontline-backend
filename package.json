@@ -11,6 +11,7 @@
     "build": "tsc && mkdir -p dist/db/migrations && cp src/db/migrations/*.sql dist/db/migrations/",
     "start": "node dist/db/migrate.js && node dist/index.js",
     "migrate": "tsx src/db/migrate.ts",
+    "set-clover-credentials": "tsx src/scripts/setCloverCredentials.ts",
     "sync-menu": "tsx src/menu-sync/reconciliation/pullMenu.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
     "webhook-worker": "tsx src/menu-sync/handlers/worker.ts",

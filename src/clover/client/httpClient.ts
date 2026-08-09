@@ -1,5 +1,5 @@
 import { cloverConfig } from "../config";
-import { getValidToken } from "../auth/getValidToken";
+import { resolveAccessToken } from "../auth/resolveAccessToken";
 import { cloverRateLimiter } from "../../shared/rate-limiter/cloverRateLimiter";
 
 const MAX_RETRIES = 5;
@@ -40,7 +40,7 @@ export async function cloverRequest<T>(
   }
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    const accessToken = await getValidToken(merchantId);
+    const { accessToken } = await resolveAccessToken(merchantId, cloverMerchantId);
 
     const response = await cloverRateLimiter.run(merchantId, () =>
       fetch(url, {
