@@ -1,11 +1,22 @@
+import type { Request } from "express";
 import { Router } from "express";
-import { getMerchantByCloverId } from "../auth/tokenStore";
+import { getHostedCheckoutWebhookSecret, getMerchantByCloverId } from "../auth/tokenStore";
 import { logger } from "../../shared/logging/logger";
+import { completeHostedCheckoutOrder } from "../../orders/order-gateway/hostedCheckoutOrder";
 import { enqueueWebhookEvent } from "./persist";
-import { verifyCloverAuthHeader } from "./verify";
+import { verifyCloverAuthHeader, verifyHostedCheckoutSignature } from "./verify";
 import type { WebhookPayload } from "./types";
 
 export const webhooksRouter = Router();
+
+interface HostedCheckoutPaymentWebhook {
+  type?: string;
+  status?: "APPROVED" | "DECLINED";
+  id?: string;
+  merchantId?: string;
+  data?: string; // checkout session id
+  message?: string;
+}
 
 webhooksRouter.post("/clover", async (req, res) => {
   const payload = req.body as WebhookPayload;
@@ -57,5 +68,58 @@ webhooksRouter.post("/clover", async (req, res) => {
         });
       }
     }
+  }
+});
+
+// Hosted Checkout (pay-by-link) payment notifications -- a genuinely
+// different webhook system from the core /clover route above: per-merchant
+// signing secret (not the app-wide CLOVER_WEBHOOK_SECRET), HMAC-SHA256
+// Clover-Signature header instead of a static X-Clover-Auth header, and a
+// single event type ("PAYMENT") rather than the I/IC/IG/IM/O/etc. taxonomy.
+// See verify.ts's verifyHostedCheckoutSignature for the exact scheme.
+webhooksRouter.post("/clover-checkout", async (req, res) => {
+  const payload = req.body as HostedCheckoutPaymentWebhook;
+  const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+
+  if (!payload.merchantId) {
+    res.sendStatus(400);
+    return;
+  }
+
+  const secret = await getHostedCheckoutWebhookSecret(payload.merchantId);
+  if (!verifyHostedCheckoutSignature(req.header("Clover-Signature"), rawBody, secret ?? undefined)) {
+    logger.error("Hosted Checkout webhook rejected: invalid or missing Clover-Signature", {
+      cloverMerchantId: payload.merchantId,
+      headerPresent: req.header("Clover-Signature") !== undefined,
+    });
+    res.sendStatus(401);
+    return;
+  }
+
+  // Ack fast, same principle as the core webhook route above -- Clover
+  // publishes no delivery-retry SLA to lean on either way.
+  res.sendStatus(200);
+
+  if (payload.type !== "PAYMENT" || !payload.data) {
+    logger.info("Ignoring Hosted Checkout webhook of unhandled shape", { type: payload.type });
+    return;
+  }
+
+  if (payload.status !== "APPROVED") {
+    // A decline doesn't cancel the pending order -- Hosted Checkout's own
+    // page lets the customer retry with a different card within the same
+    // 15-minute session, so this isn't necessarily terminal. Just log it;
+    // the timeout backstop is what governs if no later attempt succeeds.
+    logger.info("Hosted Checkout payment not approved", { checkoutSessionId: payload.data, status: payload.status });
+    return;
+  }
+
+  try {
+    await completeHostedCheckoutOrder(payload.data);
+  } catch (err) {
+    logger.error("Hosted Checkout payment webhook processing failed", {
+      checkoutSessionId: payload.data,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 });

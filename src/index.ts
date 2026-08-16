@@ -10,7 +10,17 @@ import { logger } from "./shared/logging/logger";
 import { websiteApiRouter } from "./website-api/router";
 
 const app = express();
-app.use(express.json());
+// Captures the untouched raw body onto req.rawBody for every request --
+// needed by the Hosted Checkout webhook's HMAC verification (verify.ts),
+// which must sign the exact bytes Clover sent, not a re-serialized copy of
+// the parsed JSON. Harmless/unused for every other route.
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buf);
+    },
+  }),
+);
 app.use("/webhooks", webhooksRouter);
 
 // Admin UI is a separate Next.js app on its own origin/port in dev.

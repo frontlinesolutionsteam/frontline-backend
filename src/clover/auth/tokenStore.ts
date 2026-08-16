@@ -41,6 +41,16 @@ export async function getMerchantByCloverId(cloverMerchantId: string): Promise<M
   return { id: row.id, cloverMerchantId: row.clover_merchant_id, status: row.status };
 }
 
+// Small, purpose-specific lookup (same style as getOrderTypeId) rather than
+// folding onto MerchantRecord, which most call sites don't need.
+export async function getHostedCheckoutWebhookSecret(cloverMerchantId: string): Promise<string | null> {
+  const { rows } = await pool.query(
+    `SELECT hosted_checkout_webhook_secret FROM merchants WHERE clover_merchant_id = $1`,
+    [cloverMerchantId],
+  );
+  return rows[0]?.hosted_checkout_webhook_secret ?? null;
+}
+
 export async function getConnectedMerchants(): Promise<MerchantRecord[]> {
   const { rows } = await pool.query(
     `SELECT id, clover_merchant_id, status FROM merchants WHERE status = 'connected'`,

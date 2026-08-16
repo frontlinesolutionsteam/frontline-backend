@@ -101,6 +101,7 @@ export interface ExistingOrderSnapshot {
   cloverChargeId: string | null;
   paymentStatus: string;
   declineReason: string | null;
+  hostedCheckoutUrl: string | null;
 }
 
 export async function findOrderByIdempotencyKey(
@@ -108,7 +109,7 @@ export async function findOrderByIdempotencyKey(
   idempotencyKey: string,
 ): Promise<ExistingOrderSnapshot | null> {
   const { rows } = await pool.query(
-    `SELECT id, status, clover_order_id, total_cents, clover_charge_id, payment_status, decline_reason
+    `SELECT id, status, clover_order_id, total_cents, clover_charge_id, payment_status, decline_reason, hosted_checkout_url
      FROM orders WHERE merchant_id = $1 AND idempotency_key = $2`,
     [merchantId, idempotencyKey],
   );
@@ -122,6 +123,7 @@ export async function findOrderByIdempotencyKey(
     cloverChargeId: row.clover_charge_id,
     paymentStatus: row.payment_status,
     declineReason: row.decline_reason,
+    hostedCheckoutUrl: row.hosted_checkout_url,
   };
 }
 
@@ -299,6 +301,174 @@ export interface CatalogModifier {
   cloverModifierId: string;
   name: string;
   priceCents: number;
+}
+
+// ── Pay-by-link (Hosted Checkout) ───────────────────────────────────────────
+
+export interface ClaimPendingHostedCheckoutOrder {
+  merchantId: string;
+  customerId: string;
+  source: "ai_phone" | "website";
+  requestedTime: string | null;
+  note: string | null;
+  idempotencyKey: string;
+  subtotalCents: number;
+  totalCents: number;
+  /** The original CheckoutLineItemInput[] request, re-resolved fresh at payment-completion time. */
+  pendingCart: unknown;
+}
+
+// Claims the idempotency key BEFORE any Clover call is made (no
+// hosted_checkout_session_id yet -- attachHostedCheckoutSession sets it
+// after). Same insert-first-side-effect-second shape submitPaidOrder.ts uses
+// and for the same reason: creating the Hosted Checkout session is an
+// external side effect (it produces a real, textable payment link), so two
+// concurrent requests for the same idempotency key must not both reach that
+// call -- only the one that wins this claim proceeds; the loser reuses
+// whatever the winner produces.
+export async function claimPendingHostedCheckoutOrder(
+  order: ClaimPendingHostedCheckoutOrder,
+): Promise<InsertOrderResult> {
+  const { rows } = await pool.query(
+    `INSERT INTO orders
+       (merchant_id, customer_id, source, status, requested_time, note, subtotal_cents, total_cents,
+        payment_status, idempotency_key, pending_cart_json)
+     VALUES ($1, $2, $3, 'awaiting_payment', $4, $5, $6, $7, 'unpaid', $8, $9)
+     ON CONFLICT (merchant_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+     RETURNING id`,
+    [
+      order.merchantId,
+      order.customerId,
+      order.source,
+      order.requestedTime,
+      order.note,
+      order.subtotalCents,
+      order.totalCents,
+      order.idempotencyKey,
+      JSON.stringify(order.pendingCart),
+    ],
+  );
+
+  if (rows.length > 0) return { orderId: rows[0].id, isNew: true };
+
+  const existing = await findOrderByIdempotencyKey(order.merchantId, order.idempotencyKey);
+  if (!existing) {
+    throw new Error(
+      `Pending Hosted Checkout order claim conflicted for idempotency key ${order.idempotencyKey} but no existing order was found`,
+    );
+  }
+  return { orderId: existing.id, isNew: false };
+}
+
+export async function attachHostedCheckoutSession(
+  orderId: string,
+  hostedCheckoutSessionId: string,
+  hostedCheckoutUrl: string,
+  expiresAt: Date,
+): Promise<void> {
+  await pool.query(
+    `UPDATE orders SET hosted_checkout_session_id = $1, hosted_checkout_url = $2, hosted_checkout_expires_at = $3 WHERE id = $4`,
+    [hostedCheckoutSessionId, hostedCheckoutUrl, expiresAt, orderId],
+  );
+}
+
+export interface PendingHostedCheckoutOrder {
+  id: string;
+  merchantId: string;
+  customerId: string;
+  status: string;
+  totalCents: number;
+  requestedTime: string | null;
+  note: string | null;
+  pendingCart: { itemId: string; quantity: number; note?: string; modifierIds?: string[] }[];
+  customerPhoneE164: string;
+}
+
+export async function findPendingOrderByCheckoutSessionId(
+  hostedCheckoutSessionId: string,
+): Promise<PendingHostedCheckoutOrder | null> {
+  const { rows } = await pool.query(
+    `SELECT o.id, o.merchant_id, o.customer_id, o.status, o.total_cents, o.requested_time, o.note,
+            o.pending_cart_json, c.phone_e164
+     FROM orders o
+     JOIN customers c ON c.id = o.customer_id
+     WHERE o.hosted_checkout_session_id = $1`,
+    [hostedCheckoutSessionId],
+  );
+  if (rows.length === 0) return null;
+  const row = rows[0];
+  return {
+    id: row.id,
+    merchantId: row.merchant_id,
+    customerId: row.customer_id,
+    status: row.status,
+    totalCents: row.total_cents,
+    requestedTime: row.requested_time,
+    note: row.note,
+    pendingCart: row.pending_cart_json,
+    customerPhoneE164: row.phone_e164,
+  };
+}
+
+// Timeout job's query -- every order still awaiting payment whose window has
+// lapsed. Joins customers for the cancellation SMS's phone number and
+// merchants for its Clover merchant id (ops-alert detail / dashboard lookup).
+export interface ExpiredHostedCheckoutOrder {
+  id: string;
+  hostedCheckoutSessionId: string;
+  totalCents: number;
+  customerPhoneE164: string;
+  cloverMerchantId: string;
+  businessName: string | null;
+  createdAt: string;
+}
+
+export async function findExpiredAwaitingPaymentOrders(): Promise<ExpiredHostedCheckoutOrder[]> {
+  const { rows } = await pool.query(
+    `SELECT o.id, o.hosted_checkout_session_id, o.total_cents, o.created_at,
+            c.phone_e164, m.clover_merchant_id, m.business_name
+     FROM orders o
+     JOIN customers c ON c.id = o.customer_id
+     JOIN merchants m ON m.id = o.merchant_id
+     WHERE o.status = 'awaiting_payment' AND o.hosted_checkout_expires_at < now()`,
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    hostedCheckoutSessionId: row.hosted_checkout_session_id,
+    totalCents: row.total_cents,
+    customerPhoneE164: row.phone_e164,
+    cloverMerchantId: row.clover_merchant_id,
+    businessName: row.business_name,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function markOrderCanceled(orderId: string, reason: string): Promise<void> {
+  await pool.query(`UPDATE orders SET status = 'canceled', decline_reason = $1 WHERE id = $2`, [reason, orderId]);
+}
+
+// Used once a Hosted Checkout payment is confirmed and the real atomic order
+// has just been created -- mirrors markOrderCreatedAwaitingPayment's "record
+// the Clover order id immediately, before attaching payment" sequencing, so
+// a crash between order-creation and payment-attach resumes against the same
+// Clover order rather than creating a second one.
+export async function markHostedCheckoutOrderCreated(
+  orderId: string,
+  cloverOrderId: string,
+  totalCents: number,
+  taxCents: number,
+): Promise<void> {
+  await pool.query(
+    `UPDATE orders SET clover_order_id = $1, total_cents = $2, tax_cents = $3 WHERE id = $4`,
+    [cloverOrderId, totalCents, taxCents, orderId],
+  );
+}
+
+export async function markHostedCheckoutOrderPaid(orderId: string, paymentId: string): Promise<void> {
+  await pool.query(
+    `UPDATE orders SET status = 'confirmed_clover', payment_status = 'paid', clover_charge_id = $1, payment_method = 'hosted_checkout_sms' WHERE id = $2`,
+    [paymentId, orderId],
+  );
 }
 
 export async function getCatalogModifiers(modifierIds: string[]): Promise<CatalogModifier[]> {

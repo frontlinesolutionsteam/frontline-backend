@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { getMerchantById } from "../clover/auth/tokenStore";
 import { normalizePhoneE164 } from "../customers/matching/normalizePhone";
+import { HostedCheckoutInProgressError, initiateHostedCheckoutOrder } from "../orders/order-gateway/hostedCheckoutOrder";
 import { getOrderStatus } from "../orders/order-gateway/repository";
 import { previewCart } from "../orders/order-gateway/previewCart";
 import type { CheckoutLineItemInput } from "../orders/order-gateway/resolveCartLines";
@@ -141,6 +142,67 @@ websiteApiRouter.post("/merchants/:merchantId/orders", async (req, res) => {
       return;
     }
     if (err instanceof PaymentAlreadyAttemptedError) {
+      res.status(409).json({ error: err.message });
+      return;
+    }
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+interface PayByLinkBody {
+  items?: CheckoutLineItemInput[];
+  customer?: { phone?: string; firstName?: string; lastName?: string; email?: string };
+  requestedTime?: string;
+  note?: string;
+  idempotencyKey?: string;
+}
+
+// Pay-by-link initiation -- AI-phone orders now go through this instead of
+// POST /orders' immediate ai_phone path (that path is left in place, not
+// deleted, in case it's ever needed again; Maya's finalize flow is what
+// changed, not this backend's capabilities). No kitchen ticket is created
+// here at all -- see hostedCheckoutOrder.ts for the full sequencing.
+websiteApiRouter.post("/merchants/:merchantId/orders/pay-by-link", async (req, res) => {
+  const merchantId = req.params.merchantId;
+  const body = req.body as PayByLinkBody;
+
+  const merchant = await getMerchantById(merchantId);
+  if (!merchant) {
+    res.status(404).json({ error: "Unknown merchant" });
+    return;
+  }
+  if (!body.items?.length) {
+    res.status(400).json({ error: "items must be a non-empty array" });
+    return;
+  }
+  if (!body.customer?.phone) {
+    res.status(400).json({ error: "customer.phone is required" });
+    return;
+  }
+  if (!body.idempotencyKey) {
+    res.status(400).json({ error: "idempotencyKey is required" });
+    return;
+  }
+
+  try {
+    const result = await initiateHostedCheckoutOrder({
+      merchantId,
+      cloverMerchantId: merchant.cloverMerchantId,
+      items: body.items,
+      customer: {
+        phone: body.customer.phone,
+        firstName: body.customer.firstName,
+        lastName: body.customer.lastName,
+        email: body.customer.email,
+      },
+      requestedTime: body.requestedTime,
+      note: body.note,
+      idempotencyKey: body.idempotencyKey,
+      source: "ai_phone",
+    });
+    res.json(result);
+  } catch (err) {
+    if (err instanceof HostedCheckoutInProgressError) {
       res.status(409).json({ error: err.message });
       return;
     }
