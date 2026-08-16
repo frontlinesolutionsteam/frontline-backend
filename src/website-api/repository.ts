@@ -116,3 +116,48 @@ export async function getPublicMenu(merchantId: string): Promise<PublicCategory[
     }))
     .filter((category) => category.items.length > 0);
 }
+
+export interface UsualItemResult {
+  itemId: string;
+  orderCount: number;
+}
+
+// "Usual" = the single most-frequently-ordered item, by number of distinct
+// past orders it appears in -- not total quantity, and not "most frequent
+// exact whole order" (real pilot order history never repeats as a full
+// combo; item-level frequency is the only signal that's actually there).
+// Gated in two places so a caller with thin history never gets a
+// confident-sounding "usual" that isn't real: (1) at least 2 qualifying past
+// orders total, (2) the winning item itself appears in at least 2 of them.
+// Only orders that actually reached Clover count as "qualifying" -- a
+// draft/failed/canceled order was never fulfilled and shouldn't shape what
+// we tell a customer they usually get. Ties broken by most recent
+// occurrence.
+export async function getUsualItem(merchantId: string, phoneE164: string): Promise<UsualItemResult | null> {
+  const { rows: orderRows } = await pool.query(
+    `SELECT o.id FROM orders o
+     JOIN customers c ON c.id = o.customer_id
+     WHERE c.merchant_id = $1 AND c.phone_e164 = $2
+       AND o.status IN ('confirmed_clover', 'printed')`,
+    [merchantId, phoneE164],
+  );
+  if (orderRows.length < 2) return null;
+
+  const orderIds = orderRows.map((r) => r.id);
+  const { rows: itemRows } = await pool.query(
+    `SELECT oli.item_id, COUNT(DISTINCT oli.order_id) AS order_count, MAX(o.created_at) AS last_ordered
+     FROM order_line_items oli
+     JOIN orders o ON o.id = oli.order_id
+     WHERE oli.order_id = ANY($1::uuid[])
+     GROUP BY oli.item_id
+     ORDER BY order_count DESC, last_ordered DESC
+     LIMIT 1`,
+    [orderIds],
+  );
+  if (itemRows.length === 0) return null;
+
+  const orderCount = Number(itemRows[0].order_count);
+  if (orderCount < 2) return null;
+
+  return { itemId: itemRows[0].item_id, orderCount };
+}

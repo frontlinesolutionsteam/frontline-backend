@@ -1,17 +1,32 @@
 import { Router } from "express";
 import { getMerchantById } from "../clover/auth/tokenStore";
+import { normalizePhoneE164 } from "../customers/matching/normalizePhone";
 import { getOrderStatus } from "../orders/order-gateway/repository";
 import { previewCart } from "../orders/order-gateway/previewCart";
 import type { CheckoutLineItemInput } from "../orders/order-gateway/resolveCartLines";
 import { submitOrder } from "../orders/order-gateway/submitOrder";
 import { PaymentAlreadyAttemptedError, PaymentDeclinedError, submitPaidOrder } from "../orders/order-gateway/submitPaidOrder";
-import { getPublicMenu } from "./repository";
+import { getPublicMenu, getUsualItem } from "./repository";
 
 export const websiteApiRouter = Router();
 
 websiteApiRouter.get("/merchants/:merchantId/menu", async (req, res) => {
   const categories = await getPublicMenu(req.params.merchantId);
   res.json(categories);
+});
+
+// Caller-recognition support (AI phone first; website is a future consumer of
+// the same data). Always 200s with itemId: null rather than 404ing on
+// "nothing to report" -- an unrecognized/first-time number is a normal,
+// expected response, not an error.
+websiteApiRouter.get("/merchants/:merchantId/customers/:phone/usual-item", async (req, res) => {
+  const phoneE164 = normalizePhoneE164(req.params.phone);
+  if (!phoneE164) {
+    res.status(400).json({ error: "Invalid phone number" });
+    return;
+  }
+  const result = await getUsualItem(req.params.merchantId, phoneE164);
+  res.json({ itemId: result?.itemId ?? null });
 });
 
 // Read-only, tax-aware total for the pre-checkout cart page. No order is
