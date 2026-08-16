@@ -42,8 +42,14 @@ export async function processWebhookEvent(event: WebhookEventRow): Promise<void>
       // webhook payload, and Clover doesn't document a standalone
       // modifier-by-id endpoint — refresh all modifier groups for the
       // merchant instead. Cheap in practice: restaurant modifier lists are
-      // always small. Deletions of groups/modifiers are caught by nightly
-      // reconciliation rather than handled precisely here.
+      // always small.
+      //
+      // KNOWN GAP: this refreshes/upserts, but neither this handler nor
+      // reconcileMenu.ts (which only diffs items and categories for
+      // deletion — see getKnownCloverItemIds/getKnownCloverCategoryIds) ever
+      // detects a modifier group or modifier that Clover no longer has. A
+      // deleted modifier group/modifier lingers in Postgres indefinitely.
+      // Not built yet; separate task if it turns out to matter.
       await refreshAllModifierGroups(merchant.id, merchant.cloverMerchantId);
       return;
     default:
