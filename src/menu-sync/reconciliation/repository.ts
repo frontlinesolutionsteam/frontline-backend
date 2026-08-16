@@ -123,12 +123,26 @@ export async function upsertItem(merchantId: string, item: UpsertableItem): Prom
   return { id: rows[0].id, drift };
 }
 
-export async function linkItemCategory(itemId: string, categoryId: string): Promise<void> {
+// Makes item_categories exactly match categoryIds for this item -- removes
+// stale links as well as adding new ones. A plain insert-only link (the
+// previous behavior) only ever grew the set: if Clover moved an item from
+// one category to another, the old link stuck around forever and the item
+// showed under both categories on the storefront. Called with the item's
+// full current category set every time (webhook-driven single-item refresh
+// and full reconciliation both already re-fetch the complete set from
+// Clover), so a plain diff-and-replace is correct and cheap.
+export async function syncItemCategories(itemId: string, categoryIds: string[]): Promise<void> {
   await pool.query(
-    `INSERT INTO item_categories (item_id, category_id) VALUES ($1, $2)
-     ON CONFLICT DO NOTHING`,
-    [itemId, categoryId],
+    `DELETE FROM item_categories WHERE item_id = $1 AND category_id != ALL($2::uuid[])`,
+    [itemId, categoryIds],
   );
+  for (const categoryId of categoryIds) {
+    await pool.query(
+      `INSERT INTO item_categories (item_id, category_id) VALUES ($1, $2)
+       ON CONFLICT DO NOTHING`,
+      [itemId, categoryId],
+    );
+  }
 }
 
 export async function linkItemModifierGroup(itemId: string, modifierGroupId: string): Promise<void> {

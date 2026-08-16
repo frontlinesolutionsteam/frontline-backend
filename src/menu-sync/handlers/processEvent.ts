@@ -4,10 +4,10 @@ import { fetchAllPages } from "../../clover/client/paginate";
 import type { CloverCategory, CloverItem, CloverModifierGroup } from "../../clover/types/menu";
 import { logger } from "../../shared/logging/logger";
 import {
-  linkItemCategory,
   linkItemModifierGroup,
   markCategoryDeleted,
   markItemDeleted,
+  syncItemCategories,
   upsertCategory,
   upsertItem,
   upsertModifier,
@@ -70,10 +70,11 @@ async function processItemEvent(
     });
     const { id: itemId } = await upsertItem(merchantId, item);
 
+    const categoryIds: string[] = [];
     for (const category of item.categories?.elements ?? []) {
-      const categoryId = await upsertCategory(merchantId, category);
-      await linkItemCategory(itemId, categoryId);
+      categoryIds.push(await upsertCategory(merchantId, category));
     }
+    await syncItemCategories(itemId, categoryIds);
     for (const group of item.modifierGroups?.elements ?? []) {
       const groupId = await upsertModifierGroup(merchantId, group);
       await linkItemModifierGroup(itemId, groupId);

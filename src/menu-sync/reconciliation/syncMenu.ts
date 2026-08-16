@@ -2,8 +2,8 @@ import { fetchAllPages } from "../../clover/client/paginate";
 import { getMerchantByCloverId, type MerchantRecord } from "../../clover/auth/tokenStore";
 import type { CloverCategory, CloverItem, CloverModifierGroup } from "../../clover/types/menu";
 import {
-  linkItemCategory,
   linkItemModifierGroup,
+  syncItemCategories,
   upsertCategory,
   upsertItem,
   upsertModifier,
@@ -67,10 +67,10 @@ export async function pullAndSyncMenu(cloverMerchantId: string): Promise<MenuSyn
     const { id: itemId, drift } = await upsertItem(merchant.id, item);
     if (drift) availabilityDrift.push(drift);
 
-    for (const category of item.categories?.elements ?? []) {
-      const categoryId = categoryIdMap.get(category.id);
-      if (categoryId) await linkItemCategory(itemId, categoryId);
-    }
+    const categoryIds = (item.categories?.elements ?? [])
+      .map((category) => categoryIdMap.get(category.id))
+      .filter((id): id is string => id !== undefined);
+    await syncItemCategories(itemId, categoryIds);
     for (const group of item.modifierGroups?.elements ?? []) {
       const groupId = modifierGroupIdMap.get(group.id);
       if (groupId) await linkItemModifierGroup(itemId, groupId);
