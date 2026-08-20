@@ -100,7 +100,11 @@ websiteApiRouter.post("/merchants/:merchantId/orders", async (req, res) => {
     email: body.customer.email,
   };
 
-  if (body.source === "ai_phone" || body.source === "kiosk") {
+  // ai_phone never carries a card token (voice card capture is out of
+  // scope); kiosk may or may not, depending on whether the tablet is
+  // collecting payment itself -- source alone doesn't decide paid vs unpaid
+  // for kiosk the way it does for the other two.
+  if (body.source === "ai_phone" || (body.source === "kiosk" && !body.sourceToken)) {
     try {
       const result = await submitOrder({
         merchantId,
@@ -130,6 +134,7 @@ websiteApiRouter.post("/merchants/:merchantId/orders", async (req, res) => {
       cloverMerchantId: merchant.cloverMerchantId,
       items: body.items,
       customer,
+      source: body.source === "kiosk" ? "kiosk" : "website",
       requestedTime: body.requestedTime,
       note: body.note,
       idempotencyKey: body.idempotencyKey,

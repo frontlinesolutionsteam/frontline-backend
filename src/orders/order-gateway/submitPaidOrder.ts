@@ -23,10 +23,11 @@ export interface SubmitPaidOrderInput {
   cloverMerchantId: string;
   items: CheckoutLineItemInput[];
   customer: CustomerInput;
+  source: "website" | "kiosk";
   requestedTime?: string;
   note?: string;
   idempotencyKey: string;
-  /** Single-use `clv_...` token from the storefront's Clover iframe (clover.createToken()). Never a raw card number. */
+  /** Single-use `clv_...` token from the storefront's/kiosk's Clover iframe (clover.createToken()). Never a raw card number. */
   sourceToken: string;
 }
 
@@ -178,7 +179,7 @@ export async function submitPaidOrder(input: SubmitPaidOrderInput): Promise<Subm
       {
         merchantId: input.merchantId,
         customerId: customer.id,
-        source: "website",
+        source: input.source,
         requestedTime: input.requestedTime ?? null,
         note: input.note ?? null,
         idempotencyKey: input.idempotencyKey,
@@ -228,7 +229,7 @@ export async function submitPaidOrder(input: SubmitPaidOrderInput): Promise<Subm
     // standalone-charge approach), so there's no text hack needed.
     const mapped = mapCartToCloverOrder({
       lines: internalOrderLines,
-      source: "website",
+      source: input.source,
       note: input.note,
       requestedTime: input.requestedTime,
       cloverCustomerId: customer.cloverCustomerId ?? undefined,
