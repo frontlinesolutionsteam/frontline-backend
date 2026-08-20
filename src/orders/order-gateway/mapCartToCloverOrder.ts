@@ -35,7 +35,7 @@ export interface InternalOrderLine {
 
 export interface InternalOrder {
   lines: InternalOrderLine[];
-  source: "website" | "ai_phone";
+  source: "website" | "ai_phone" | "kiosk";
   /** Free-text customer note ("no cilantro, ring bell"). */
   note?: string;
   /** Requested pickup time as the customer phrased it. See GAP-1. */
@@ -133,6 +133,7 @@ export function mapCartToCloverOrder(order: InternalOrder): MappedOrder {
   if (order.requestedTime) noteParts.push(`Pickup: ${order.requestedTime}`);
   if (order.note) noteParts.push(order.note);
   if (order.source === "ai_phone") noteParts.push("Placed by AI phone order");
+  if (order.source === "kiosk") noteParts.push("Placed via kiosk");
 
   const note = noteParts.length ? noteParts.join(" | ") : undefined;
   if (note && note.length > 255) {

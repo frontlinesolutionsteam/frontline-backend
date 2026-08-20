@@ -59,7 +59,7 @@ interface CheckoutBody {
   customer?: { phone?: string; firstName?: string; lastName?: string; email?: string };
   requestedTime?: string;
   note?: string;
-  source?: "website" | "ai_phone";
+  source?: "website" | "ai_phone" | "kiosk";
   // GAP-4: required, caller-generated, stable across retries of one checkout
   // attempt. See submitOrder.ts / mapCartToCloverOrder.ts GAP-4.
   idempotencyKey?: string;
@@ -100,14 +100,14 @@ websiteApiRouter.post("/merchants/:merchantId/orders", async (req, res) => {
     email: body.customer.email,
   };
 
-  if (body.source === "ai_phone") {
+  if (body.source === "ai_phone" || body.source === "kiosk") {
     try {
       const result = await submitOrder({
         merchantId,
         cloverMerchantId: merchant.cloverMerchantId,
         items: body.items,
         customer,
-        source: "ai_phone",
+        source: body.source,
         requestedTime: body.requestedTime,
         note: body.note,
         idempotencyKey: body.idempotencyKey,

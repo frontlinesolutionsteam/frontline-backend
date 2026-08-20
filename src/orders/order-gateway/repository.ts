@@ -13,7 +13,7 @@ export interface CartLineItem {
 export interface NewOrder {
   merchantId: string;
   customerId: string | null;
-  source: "website" | "ai_phone";
+  source: "website" | "ai_phone" | "kiosk";
   requestedTime: string | null;
   note: string | null;
   idempotencyKey: string;

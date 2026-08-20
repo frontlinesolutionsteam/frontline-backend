@@ -21,7 +21,7 @@ export interface SubmitOrderInput {
   cloverMerchantId: string;
   items: CheckoutLineItemInput[];
   customer: CustomerInput;
-  source: "website" | "ai_phone";
+  source: "website" | "ai_phone" | "kiosk";
   requestedTime?: string;
   note?: string;
   // GAP-4: caller-supplied, stable across retries of the SAME checkout

@@ -27,8 +27,13 @@ app.use("/webhooks", webhooksRouter);
 app.use("/admin", cors({ origin: process.env.ADMIN_APP_ORIGIN ?? "http://localhost:3001" }), adminApiRouter);
 app.use("/uploads", express.static(UPLOADS_DIR));
 
-// Storefront is a separate Next.js app on its own origin/port in dev.
-app.use("/website", cors({ origin: process.env.STOREFRONT_APP_ORIGIN ?? "http://localhost:3002" }), websiteApiRouter);
+// Storefront and kiosk are separate Next.js apps, each on its own origin/port
+// in dev, sharing this same /website API surface.
+const websiteAllowedOrigins = [
+  process.env.STOREFRONT_APP_ORIGIN ?? "http://localhost:3002",
+  process.env.KIOSK_APP_ORIGIN ?? "http://localhost:3003",
+];
+app.use("/website", cors({ origin: websiteAllowedOrigins }), websiteApiRouter);
 
 // Short-lived, single-use OAuth state values, keyed by value, cleared once consumed.
 const pendingStates = new Set<string>();
